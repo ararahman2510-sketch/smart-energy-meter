@@ -1,17 +1,17 @@
 import os
 import time
-from typing import List
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
-from ml_engine import AnomalyDetector, detect_phantom_load, generate_smart_bill
+from ml_engine import AnomalyDetector, detect_phantom_load, generate_smart_bill, classify_appliance_nilm
 
 app = FastAPI(
-    title="AI Smart Energy Meter Cloud API",
-    description="Real-time ingestion, Isolation Forest anomaly detection, and smart billing.",
-    version="1.0.0"
+    title="Novel AI Smart Energy Meter API",
+    description="Edge-cloud partitioned ingestion, Isolation Forest, NILM disaggregation, and Carbon Accounting.",
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -40,6 +40,7 @@ else:
 
 detector = AnomalyDetector()
 TELEMETRY_BUFFER: List[dict] = []
+NILM_EVENTS: List[dict] = []
 BUFFER_MAX_SIZE = 200
 
 class TelemetryPayload(BaseModel):
@@ -55,16 +56,35 @@ class TelemetryPayload(BaseModel):
 def health_check():
     return {
         "status": "online",
-        "service": "AI Smart Meter Cloud API",
+        "service": "Novel Edge-Cloud Smart Meter Core",
         "buffered_records": len(TELEMETRY_BUFFER),
+        "nilm_events_logged": len(NILM_EVENTS),
         "db_connected": db_collection is not None
     }
 
 @app.post("/api/v1/telemetry")
 def ingest_telemetry(payload: TelemetryPayload):
     record = payload.model_dump()
+    
+    # 1. Anomaly classification
     is_anomaly = detector.predict(record["active_power_watts"])
     record["is_anomaly"] = is_anomaly
+
+    # 2. NILM Load Disaggregation
+    if TELEMETRY_BUFFER:
+        prev_power = TELEMETRY_BUFFER[-1]["active_power_watts"]
+        delta_p = record["active_power_watts"] - prev_power
+        appliance = classify_appliance_nilm(delta_p, record["power_factor"])
+        if appliance:
+            nilm_entry = {
+                "timestamp": record["timestamp"],
+                "appliance": appliance,
+                "delta_watts": round(delta_p, 1),
+                "power_factor": record["power_factor"]
+            }
+            NILM_EVENTS.append(nilm_entry)
+            if len(NILM_EVENTS) > 20:
+                NILM_EVENTS.pop(0)
 
     TELEMETRY_BUFFER.append(record)
     if len(TELEMETRY_BUFFER) > BUFFER_MAX_SIZE:
@@ -91,6 +111,10 @@ def get_recent_telemetry(limit: int = 50):
         for item in TELEMETRY_BUFFER[-limit:]
     ]
     return clean_records
+
+@app.get("/api/v1/nilm/events")
+def get_nilm_events():
+    return NILM_EVENTS
 
 @app.get("/api/v1/analytics/bill")
 def get_ai_smart_bill():
@@ -121,4 +145,5 @@ def get_ai_smart_bill():
 @app.post("/api/v1/buffer/clear")
 def clear_buffer():
     TELEMETRY_BUFFER.clear()
+    NILM_EVENTS.clear()
     return {"status": "cleared", "buffer_size": 0}

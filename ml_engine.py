@@ -1,6 +1,9 @@
 import numpy as np
 from sklearn.ensemble import IsolationForest
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+# Grid emission intensity factor for India (CEA Baseline: ~0.71 kg CO2 / kWh)
+CARBON_INTENSITY_KG_PER_KWH = 0.716
 
 class AnomalyDetector:
     def __init__(self, contamination: float = 0.05):
@@ -22,6 +25,26 @@ class AnomalyDetector:
     def predict(self, active_power_watts: float) -> bool:
         prediction = self.model.predict([[active_power_watts]])
         return bool(prediction[0] == -1)
+
+def classify_appliance_nilm(delta_watts: float, power_factor: float) -> Optional[str]:
+    """
+    Non-Intrusive Load Monitoring (NILM) signature disaggregation
+    Identifies high-draw devices based on step changes in active & reactive load.
+    """
+    abs_delta = abs(delta_watts)
+    if abs_delta < 40:
+        return None
+    if 1800 <= abs_delta <= 2800 and power_factor > 0.92:
+        return "Water Geyser / Electric Kettle (Resistive High Load)"
+    elif 1200 <= abs_delta <= 2000 and power_factor < 0.88:
+        return "Air Conditioner / Heat Pump (Inductive Motor)"
+    elif 600 <= abs_delta <= 1100 and power_factor < 0.85:
+        return "Microwave / Washing Machine Spin Cycle"
+    elif 100 <= abs_delta <= 250:
+        return "Refrigerator Compressor Cycle"
+    elif 40 <= abs_delta <= 90:
+        return "Entertainment Console / PC Rig"
+    return "Unclassified Distributed Load"
 
 def detect_phantom_load(recent_readings: List[Dict[str, Any]], idle_threshold_watts: float = 80.0) -> Dict[str, Any]:
     if not recent_readings:
@@ -56,6 +79,7 @@ def generate_smart_bill(total_units_kwh: float, phantom_stats: Dict[str, Any], a
 
     phantom_cost = phantom_stats.get("loss_inr", 0.0)
     total_bill = round(base_bill, 2)
+    carbon_emitted_kg = round(total_units_kwh * CARBON_INTENSITY_KG_PER_KWH, 2)
 
     recommendations = []
     if phantom_stats.get("is_phantom_detected", False):
@@ -80,6 +104,7 @@ def generate_smart_bill(total_units_kwh: float, phantom_stats: Dict[str, Any], a
     return {
         "units_consumed_kwh": round(total_units_kwh, 2),
         "total_bill_inr": total_bill,
+        "carbon_kg": carbon_emitted_kg,
         "phantom_loss_kwh": phantom_stats.get("estimated_monthly_loss_kwh", 0.0),
         "phantom_waste_inr": phantom_cost,
         "anomalies_detected": anomaly_count,
